@@ -1,0 +1,67 @@
+rules_version = '2';
+
+// 우리집 가계부 보안 규칙
+// - config/family 문서의 code(가족 코드)를 아는 기기만 members에 등록됩니다.
+// - 등록된 기기만 내역과 예산을 읽고 쓸 수 있습니다.
+// - config 문서는 앱에서 읽거나 쓸 수 없고, Firebase 콘솔에서만 바꿉니다.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+    function isMember() {
+      return signedIn() && exists(/databases/$(database)/documents/members/$(request.auth.uid));
+    }
+    function familyCode() {
+      return get(/databases/$(database)/documents/config/family).data.code;
+    }
+    function validEntry(d) {
+      return d.keys().hasOnly(['date', 'month', 'type', 'amount', 'category', 'memo', 'by', 'createdAt', 'updatedAt'])
+        && d.date is string && d.date.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && d.month is string && d.month.matches('^[0-9]{4}-[0-9]{2}$')
+        && d.type in ['income', 'expense']
+        && d.amount is number && d.amount > 0 && d.amount < 1000000000000
+        && d.category in ['식비', '교통', '공과금', '교육', '의료', '용돈', '기타']
+        && d.memo is string && d.memo.size() <= 60
+        && d.by is string
+        && d.createdAt is number && d.updatedAt is number;
+    }
+
+    // 가족 코드 보관용: 앱에서는 접근 불가
+    match /config/{docId} {
+      allow read, write: if false;
+    }
+
+    // 가족 구성원(기기) 등록
+    match /members/{uid} {
+      allow read: if isMember();
+      allow create: if signedIn() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['name', 'code', 'joinedAt'])
+        && request.resource.data.code == familyCode()
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0 && request.resource.data.name.size() <= 20
+        && request.resource.data.joinedAt is number;
+      allow update: if signedIn() && request.auth.uid == uid && isMember()
+        && request.resource.data.keys().hasOnly(['name', 'code', 'joinedAt'])
+        && request.resource.data.code == familyCode()
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0 && request.resource.data.name.size() <= 20;
+      allow delete: if false;
+    }
+
+    // 수입·지출 내역
+    match /entries/{entryId} {
+      allow read, delete: if isMember();
+      allow create, update: if isMember() && validEntry(request.resource.data);
+    }
+
+    // 월별 예산 (문서 ID = 2026-10 형식)
+    match /budgets/{ym} {
+      allow read: if isMember();
+      allow write: if isMember() && ym.matches('^[0-9]{4}-[0-9]{2}$')
+        && request.resource.data.keys().hasOnly(['amount', 'by', 'updatedAt'])
+        && request.resource.data.amount is number && request.resource.data.amount >= 0;
+    }
+  }
+}
